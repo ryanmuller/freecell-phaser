@@ -1,0 +1,260 @@
+<!doctype html>
+<head>
+  <script src="assets/js/phaser.js"></script>
+  <script src="assets/js/underscore-min.js"></script>
+  <script src="assets/js/cards.js"></script>
+</head>
+<body>
+<div id="game"></div>
+
+<script type="text/javascript">
+(function() {
+  var game = new Phaser.Game(800, 600, Phaser.CANVAS, 'game', { 
+    preload: preload,
+    create: create,
+    update: update,
+    render: render
+  });
+
+  var NUM_CELLS = 4;
+  var CELL_TOP_Y = 20;
+  var CELL_LEFT_X = 20;
+  var FOUNDATION_TOP_Y = 20;
+  var FOUNDATION_RIGHT_X = 700;
+  var CASCADE_TOP_Y = 200;
+  var CASCADE_LEFT_X = 40;
+  var STACK_WIDTH = 90;
+  var CASCADE_Y_OFFSET = 25;
+
+  var cardSpriteNum = function(card) {
+    // clubs, spades, hearts, diamonds
+    // ace, king, queen, jack, 10, 9, ...
+    var spriteSuits = [Cards.Suit.CLUBS, Cards.Suit.SPADES, Cards.Suit.HEARTS, Cards.Suit.DIAMONDS];
+    var spriteRanks = [Cards.Rank.ACE, Cards.Rank.KING, Cards.Rank.QUEEN, Cards.Rank.JACK, Cards.Rank.TEN, Cards.Rank.NINE, Cards.Rank.EIGHT, Cards.Rank.SEVEN, Cards.Rank.SIX, Cards.Rank.FIVE, Cards.Rank.FOUR, Cards.Rank.THREE, Cards.Rank.TWO];
+
+    return 4*spriteRanks.indexOf(card.rank) + spriteSuits.indexOf(card.suit) + 1;
+
+  }
+
+  var cardIndex = function(card) {
+    return 4*(card.rank-1)+card.suit;
+  }
+
+  var cards = {};
+  var supergroup;
+  var cascades;
+  var cells;
+  var foundations;
+  var drag;
+  var dragOrigin;
+
+  function stacks() {
+    return _.flatten([cascades.children, cells.children, foundations.children], true);
+  }
+
+  function stackTops() {
+    return _.map(stacks(), function(stack) {
+      return stack.getTop();
+    });
+  }
+
+  function freeCards(stack) {
+    return _.reduce(stack.children, function(freeCards, card) {
+      var index = stack.getIndex(card);
+
+      if (index > 0 && cards[card.key].alternatingFollows(cards[stack.getAt(index-1).key])) {
+        freeCards.push(card)
+        return freeCards;
+      } else {
+        var ret = []
+        if (card.key != 'empty') {
+          ret.push(card)
+        }
+        return ret;
+      }
+    }, []);
+  }
+
+  function isCascade(stack) {
+    return stack.parent == cascades;
+  }
+
+  function isFoundation(stack) {
+    return stack.parent == foundations;
+  }
+
+  function isCell(stack) {
+    return stack.parent == cells;
+  }
+
+  function isEmpty(stack) {
+    // all stacks except drag start with empty sprite
+    return stack != drag && stack.length == 1;
+  }
+
+  function moveToStack(card, stack) {
+    var y_offset = 0;
+
+    if (isCascade(stack) && !isEmpty(stack)) {
+      y_offset = CASCADE_Y_OFFSET;
+    }
+
+    if (stack != drag) {
+      card.x = stack.getTop().x;
+      card.y = stack.getTop().y + y_offset;
+    }
+    card.parent.remove(card);
+    stack.add(card);
+  }
+
+  function moveStackToStack(stackOrig, stackDest) {
+    while (stackOrig.length > 0) {
+      moveToStack(stackOrig.getAt(0), stackDest);
+    }
+  }
+
+  function canPlace(stackOrig, stackDest) {
+    var origStart = cards[stackOrig.getAt(0).key];
+    var destTop = cards[stackDest.getTop().key];
+
+    if (isCascade(stackDest)) {
+      return numFreecells() >= stackOrig.length-1 && (isEmpty(stackDest) || origStart.alternatingFollows(destTop));
+    } else if (isFoundation(stackDest)) {
+      return stackOrig.length == 1 && destTop.follows(origStart) && origStart.sameSuit(destTop);
+    } else if (isCell(stackDest)) {
+      return stackOrig.length == 1 && isEmpty(stackDest);
+    } else {
+      return false;
+    }
+  }
+
+  function numFreecells() {
+    return _.filter(cells.children, isEmpty).length;
+  }
+
+  function checkOverlap(spriteA, spriteB) {
+    var boundsA = spriteA.getBounds();
+    var boundsB = spriteB.getBounds();
+
+    return Phaser.Rectangle.intersects(boundsA, boundsB);
+  }
+
+  function draggableStack(stack) {
+    _.each(freeCards(stack), function(card) {
+      card.input.enableDrag(false, false);
+      card.events.onDragStart.add(function(draggedCard) {
+        dragOrigin = draggedCard.parent;
+        var draggedIndex = dragOrigin.getIndex(draggedCard);
+
+        while(dragOrigin.length > draggedIndex) {
+          moveToStack(dragOrigin.getAt(draggedIndex), drag);
+        }
+      }, this);
+      card.events.onDragStop.add(function(draggedCard) {
+        var placableStackTop = _.find(stackTops(), function(stackTop) {
+          return checkOverlap(stackTop, draggedCard) && canPlace(drag, stackTop.parent);
+        });
+
+        if (placableStackTop) {
+          moveStackToStack(drag, placableStackTop.parent);
+          draggableStack(dragOrigin); // enable dragging on new free cards on origin
+        } else {
+          moveStackToStack(drag, dragOrigin);
+        }
+      }, this);
+    });
+  }
+
+  function preload() {
+    _.each(Cards.Deck(), function(card, i) {
+      var key = 'card'+i;
+      cards[key] = card;
+      game.load.image(key, 'assets/sprites/cards/'+cardSpriteNum(card)+'.png');
+    });
+
+    game.load.image('empty', 'assets/sprites/empty.png');
+    cards['empty'] = Cards.EmptyCard();
+  }
+
+  function create() {
+    var shuffled = [];
+    _.times(52, function(i) { shuffled.push(i); });
+    shuffled = _.shuffle(shuffled);
+
+    supergroup = game.add.group();
+    cascades = game.add.group();
+    supergroup.add(cascades);
+
+    var deckIndex = 0;
+    var y;
+    var x = CASCADE_LEFT_X;
+    _.times(8, function(cascadeIndex) {
+      var numCards = cascadeIndex < 4 ? 7 : 6;
+      var cascade = game.add.group()
+      var card;
+      
+      cascades.add(cascade);
+
+      y = CASCADE_TOP_Y;
+      card = cascade.create(x, y, 'empty');
+
+      _.times(numCards, function() {
+        card = cascade.create(x, y, 'card'+shuffled[deckIndex++]);
+        card.inputEnabled = true;
+        y += CASCADE_Y_OFFSET;
+      });
+      x += STACK_WIDTH;
+    });
+
+    cascades.forEach(draggableStack);
+
+    cells = game.add.group()
+    supergroup.add(cells);
+
+    x = CELL_LEFT_X;
+    y = CELL_TOP_Y;
+
+    _.times(NUM_CELLS, function(cellIndex) {
+      var cell = game.add.group();
+      cells.add(cell);
+      cell.create(x, y, 'empty');
+      x += STACK_WIDTH;
+    });
+
+    foundations = game.add.group();
+
+    x = FOUNDATION_RIGHT_X;
+    y = FOUNDATION_TOP_Y;
+
+    _.times(4, function(foundationIndex) {
+      var foundation = game.add.group();
+      foundation.create(x, y, 'empty');
+      foundations.add(foundation);
+      x -= STACK_WIDTH;
+    });
+
+    supergroup.add(foundations);
+
+    drag = game.add.group();
+    supergroup.add(drag);
+  }
+
+  function update() {
+    var draggedCard = _.find(drag.children, function(card) {
+      return card.input.isDragged;
+    });
+    
+    if (draggedCard) {
+      draggedIndex = drag.getIndex(draggedCard);
+      drag.forEach(function(card, index) {
+        card.x = draggedCard.x;
+        card.y = draggedCard.y + CASCADE_Y_OFFSET * (drag.getIndex(card) - draggedIndex);
+      });
+    }
+  }
+
+  function render() {
+  }
+})();
+</script>
+</body>
